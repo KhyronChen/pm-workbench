@@ -62,7 +62,6 @@
   .btn-ghost:hover{border-color:var(--green-500);color:var(--green-700)}
   .btn-danger{background:var(--red-600);color:#fff}
   .btn-danger:hover{filter:brightness(.92)}
-  .cf-mask{z-index:300}
   .cf-box{background:#fff;border-radius:14px;padding:22px 22px 18px;max-width:380px;width:100%;box-shadow:0 24px 60px rgba(6,40,30,.22);margin-top:16vh}
   .cf-title{font-size:15px;font-weight:700;color:var(--ink-900);margin-bottom:8px}
   .cf-msg{font-size:13.5px;line-height:1.75;color:var(--ink-500);white-space:pre-line;word-break:break-word}
@@ -269,6 +268,7 @@
     .cal-cell .dots i{width:6px;height:6px}
   }
   .modal-mask{position:fixed;inset:0;background:rgba(6,40,30,.45);backdrop-filter:blur(2px);display:none;align-items:flex-start;justify-content:center;z-index:200;padding:6vh 16px;overflow:auto}
+  .cf-mask{z-index:300}
   .modal-mask.open{display:flex}
   .modal{background:#fff;border-radius:16px;box-shadow:var(--shadow-lg);width:100%;max-width:480px;padding:24px;animation:pop .22s ease}
   @keyframes pop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
@@ -594,9 +594,15 @@
     <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
       <button class="btn btn-primary" id="shareWeChatBtn" onclick="shareSnapshotFile()">📤 系统分享（可发微信）</button>
       <button class="btn btn-ghost" onclick="downloadSnapshotFile()">⬇️ 下载文件</button>
+      <button class="btn btn-ghost" onclick="closeShareModal(); openCloudModal()">☁️ 云同步（多设备）</button>
     </div>
     <p style="font-size:11.5px;color:var(--ink-500);margin-top:12px;line-height:1.7">提示：电脑端下载后，直接把文件拖进微信聊天窗口即可发送；手机端点「系统分享」后在面板中选择微信。</p>
   </div>
+</div>
+
+<!-- 云同步弹窗 -->
+<div class="modal-mask" id="cloudModal" onclick="if(event.target===this) closeCloudModal()">
+  <div class="modal" style="max-width:420px" id="cloudBody"></div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -1810,6 +1816,127 @@ function downloadSnapshotFile(r){
   toast("分享文件已下载 ⬇️ 可拖入微信聊天窗口发送");
   closeShareModal();
 }
+/* ================= 云同步（GitHub 私有 Gist） ================= */
+/* Token 与 Gist ID 存独立 localStorage 键，绝不进入 state —— 导出/发布快照天然不带密钥。
+   同步模型：后写覆盖。换设备操作前先「从云拉取」，操作完「上传到云」。 */
+const CLOUD_TOK_KEY = "fmcg-pm-cloud-tok";
+const CLOUD_GIST_KEY = "fmcg-pm-cloud-gist";
+const CLOUD_GIST_DESC = "PM工作台云同步（私有）";
+function cloudTok(){ return localStorage.getItem(CLOUD_TOK_KEY) || ""; }
+function cloudGist(){ return localStorage.getItem(CLOUD_GIST_KEY) || ""; }
+function cloudConfigured(){ return !!(cloudTok() && cloudGist()); }
+
+async function ghApi(path, opts){
+  opts = opts || {};
+  const headers = { "Authorization": "token " + cloudTok(), "Accept": "application/vnd.github+json" };
+  if(opts.body){ headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.body); }
+  const res = await fetch("https://api.github.com" + path, Object.assign({}, opts, { headers }));
+  if(res.status === 401) throw new Error("Token 无效或已过期，请重新生成并配置");
+  if(res.status === 403) throw new Error("Token 权限不足（需勾选 gist 权限）或触发限流");
+  if(!res.ok){ let msg = "GitHub API 错误 " + res.status; try{ msg += "：" + (await res.json()).message; }catch(e){} throw new Error(msg); }
+  return res.status === 204 ? null : res.json();
+}
+
+function openCloudModal(){ renderCloudModal(); document.getElementById("cloudModal").classList.add("open"); }
+function closeCloudModal(){ const m = document.getElementById("cloudModal"); if(m) m.classList.remove("open"); }
+
+function renderCloudModal(){
+  const body = document.getElementById("cloudBody");
+  if(cloudConfigured()){
+    body.innerHTML = `
+      <h3>☁️ 云同步</h3>
+      <p style="font-size:12.5px;color:var(--ink-500);line-height:1.7">已绑定云端（Gist <code>${cloudGist().slice(0,8)}…</code>）。规则：<b>换设备前先拉取，改完后上传</b>，后写覆盖。</p>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        <button class="btn btn-primary" onclick="cloudPush()">⬆️ 上传当前数据到云</button>
+        <button class="btn btn-ghost" onclick="cloudPull()">⬇️ 从云拉取数据（覆盖本机）</button>
+        <button class="btn btn-ghost" onclick="copyCloudToken()">📋 复制 Token（新设备配置用）</button>
+        <button class="btn btn-ghost" style="color:#b91c1c" onclick="cloudUnbind()">🗑 解除本机绑定</button>
+      </div>`;
+  }else{
+    body.innerHTML = `
+      <h3>☁️ 云同步（多设备）</h3>
+      <p style="font-size:13px;color:var(--ink-700);line-height:1.8">通过你的 GitHub 账号同步数据，私有、免费。配置一次，所有设备用同一个 Token：</p>
+      <p style="font-size:12px;color:var(--ink-500);line-height:1.7;background:#f0fdf4;border:1px solid var(--line);border-radius:8px;padding:10px">
+        ① 打开 github.com → 头像 → Settings → Developer settings → Personal access tokens (classic) → Generate new token (classic)<br>
+        ② 只勾选 <b>gist</b> 一个权限 → 生成 → 复制（形如 ghp_xxx）<br>
+        ③ 粘贴到下面，点「创建云端」
+      </p>
+      <div class="field" style="margin-top:10px"><label>Github Token（ghp_ 开头）</label><input id="cloudTokInput" placeholder="ghp_xxxxxxxxxxxx" style="width:100%"></div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        <button class="btn btn-primary" onclick="cloudInit()">☁️ 创建云端（首次使用）</button>
+        <button class="btn btn-ghost" onclick="cloudBind()">🔗 绑定已有云端（其他设备）</button>
+      </div>
+      <p style="font-size:11px;color:var(--ink-500);margin-top:10px">Token 只存在本机浏览器，绝不随导出/分享文件外带。</p>`;
+  }
+}
+
+function cloudSaveTok(tok, gistId){
+  localStorage.setItem(CLOUD_TOK_KEY, tok);
+  if(gistId) localStorage.setItem(CLOUD_GIST_KEY, gistId);
+}
+async function cloudInit(){
+  const tok = (document.getElementById("cloudTokInput").value || "").trim();
+  if(!/^gh[pousr]_/.test(tok) && !/^github_pat_/.test(tok)){ toast("请粘贴 ghp_ 开头的 Token"); return; }
+  cloudSaveTok(tok, "");
+  try{
+    save();
+    const g = await ghApi("/gists", { method:"POST", body:{ description:CLOUD_GIST_DESC, public:false, files:{ "workbench.json":{ content: JSON.stringify(state) } } } });
+    cloudSaveTok(tok, g.id);
+    renderCloudModal();
+    toast("云端已创建 ✓ 之后点「上传」即可同步");
+  }catch(e){ toast(e.message); }
+}
+async function cloudBind(){
+  const tok = (document.getElementById("cloudTokInput").value || "").trim();
+  if(!tok){ toast("请先粘贴 Token"); return; }
+  cloudSaveTok(tok, "");
+  try{
+    const list = await ghApi("/gists?per_page=100");
+    const hit = list.find(g => g.description === CLOUD_GIST_DESC);
+    if(!hit){ toast("云端不存在：请先在常用设备上「创建云端」"); return; }
+    cloudSaveTok(tok, hit.id);
+    renderCloudModal();
+    await cloudPull();
+  }catch(e){ toast(e.message); }
+}
+async function cloudPush(){
+  if(!cloudConfigured()){ toast("请先配置云同步"); return; }
+  try{
+    save();
+    await ghApi("/gists/" + cloudGist(), { method:"PATCH", body:{ files:{ "workbench.json":{ content: JSON.stringify(state) } } } });
+    toast("已上传到云 ☁️（" + state.projects.length + " 个项目）");
+  }catch(e){ toast("上传失败：" + e.message); }
+}
+async function cloudPull(){
+  if(!cloudConfigured()){ toast("请先配置云同步"); return; }
+  try{
+    const g = await ghApi("/gists/" + cloudGist());
+    const file = g.files && g.files["workbench.json"];
+    if(!file || !file.content){ toast("云端暂无数据，请先上传"); return; }
+    const data = JSON.parse(file.content);
+    if(!data.tasks || !data.projects) throw new Error("云端数据格式不正确");
+    if(!(await askConfirm(`将从云端拉取 ${data.projects.length} 个项目、${data.tasks.length} 条任务，并覆盖本机当前数据。确定继续吗？`, "覆盖本机", "从云拉取"))) return;
+    state = data;
+    fillMissing();
+    save(); autoDefer(); renderAll();
+    closeCloudModal();
+    toast("已从云拉取最新数据 ✓");
+  }catch(e){ toast("拉取失败：" + e.message); }
+}
+function copyCloudToken(){
+  const tok = cloudTok();
+  const ta = document.createElement("textarea");
+  ta.value = tok; document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); toast("Token 已复制，在新设备云同步里粘贴即可"); }catch(e){ toast("复制失败，请手动复制"); }
+  document.body.removeChild(ta);
+}
+function cloudUnbind(){
+  localStorage.removeItem(CLOUD_TOK_KEY);
+  localStorage.removeItem(CLOUD_GIST_KEY);
+  renderCloudModal();
+  toast("已解除本机绑定（云端数据保留）");
+}
+
 function importData(ev){
   const file = ev.target.files[0]; if(!file) return;
   const reader = new FileReader();
